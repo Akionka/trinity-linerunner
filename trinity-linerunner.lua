@@ -13,9 +13,40 @@ local new, str, sizeof = imgui.new, ffi.string, ffi.sizeof
 
 local fcomp_default = function(a, b) return a < b end
 function table.bininsert(t, value, fcomp) fcomp = fcomp or fcomp_default local iStart,iEnd,iMid,iState = 1,#t,1,0 while iStart <= iEnd do iMid = math.floor( (iStart+iEnd)/2 ) if fcomp( value,t[iMid] ) then iEnd,iState = iMid - 1,0 else iStart,iState = iMid + 1,1 end end table.insert( t,(iMid+iState),value ) return (iMid+iState) end
+---@class vehicleModel
+---@field trunk_size integer
+local VehicleModel = {
+  trunk_size = 0,
+}
+---@param trunk_size integer
+---@return Vehicle
+function VehicleModel:new(trunk_size)
+  local v = {
+    trunk_size = trunk_size,
+  }
+  setmetatable(v, self)
+  self.__index = self
+  return v
+end
+---@enum vehicle_name
+local VEHICLE_NAME = {
+  BENSON = 499,
+  BERKLEYS_VAN = 459,
+  BOXVILLE = 609,
+  BURRITO = 482,
+  PONY = 413,
+  RUMPO = 440,
+  YANKEE = 456,
+}
 ---@enum vehicle_model
 local VEHICLE_MODEL = {
-  YANKEE = 456, ---@type Model
+  [VEHICLE_NAME.BENSON] = VehicleModel:new(1500),
+  [VEHICLE_NAME.BERKLEYS_VAN] = VehicleModel:new(1000),
+  [VEHICLE_NAME.BOXVILLE] = VehicleModel:new(2000),
+  [VEHICLE_NAME.BURRITO] = VehicleModel:new(1000),
+  [VEHICLE_NAME.PONY] = VehicleModel:new(1000),
+  [VEHICLE_NAME.RUMPO] = VehicleModel:new(1000),
+  [VEHICLE_NAME.YANKEE] = VehicleModel:new(3000),
 }
 ---@enum dialog
 local DIALOG = {
@@ -29,7 +60,7 @@ local DIALOG = {
   GOODS_SELL = 3370,
   INFORMATION = 45,
 }
----@class good_type
+---@class goodType
 ---@field position integer Localized good type name
 ---@field name string Position in goods list when buying them
 ---@field purchase_price integer Price for buying goods
@@ -47,7 +78,7 @@ local GoodType = {
 ---@param purchase_price integer
 ---@param sale_price integer
 ---@param gives_bonus boolean
----@return good_type
+---@return goodType
 function GoodType:new(name, position, purchase_price, sale_price, gives_bonus)
   local gt = {
     name = name,
@@ -72,7 +103,7 @@ local GOOD_TYPE = {
 }
 ---Converts string to good type
 ---@param str string
----@return good_type
+---@return goodType
 function GoodType.from_string(str)
   if str:find(cp'[Пп]родукт.*') then return GOOD_TYPE.PRODUCTS
   elseif str:find(cp'[Ээ]лектроник.*') or str:find(cp'[Мм]ебель.*') then return GOOD_TYPE.FUR_ELECTRONICS
@@ -125,7 +156,7 @@ end
 ---@field idx integer In-game business index
 ---@field name string In-game business name
 ---@field position position In-game business position
----@field good_type good_type
+---@field good_type goodType
 ---@field required_goods integer?
 ---@field private blip Marker?
 ---@field private checkpoint Checkpoint?
@@ -143,7 +174,7 @@ local Business = {
 ---@param idx integer
 ---@param name string
 ---@param position position
----@param good_type good_type
+---@param good_type goodType
 ---@return business
 function Business:new(idx, name, position, good_type)
   local b = {
@@ -695,7 +726,7 @@ local function alert(text, color)
 end
 ---Calculates required goods of each type until vehicle trunk is full or all routes are fulfilled
 ---@param routes route[]
----@param ignored_good_types set<good_type>
+---@param ignored_good_types set<goodType>
 ---@param vehicle_trunk_size integer
 ---@return vehicle_trunk
 local function get_required_goods(routes, ignored_good_types, vehicle_trunk_size)
@@ -991,38 +1022,52 @@ local function recent_businesses_cleanup()
 end
 
 local speed_multiplier = 1.4
+local current_business ---@type business?
+local current_business_sync_count = 0 ---@type integer
+
+---@param business business
+local function sell_prods(business)
+  local good_type = business.good_type
+  local quantity = vehicle_trunk[good_type]
+  if quantity > 0 then
+    alert('Selling '..quantity..' '..good_type.name .. ' to '..business.name)
+    recent_businesses[business] = os.time() + 5 * 60
+    sampSendChat('/sellprods')
+  end
+end
 
 function sampev.onSendVehicleSync(data)
-  if overlay.auto_sell[0] and isCharInModel(PLAYER_PED, VEHICLE_MODEL.YANKEE) then
-    -- local move_speed = math.sqrt(data.moveSpeed.x^2 + data.moveSpeed.y^2 + data.moveSpeed.z^2) * speed_multiplier * 100
-    local business_next = get_nearest_business(businesses, {
-      x = data.position.x + data.moveSpeed.x,
-      y = data.position.y + data.moveSpeed.y,
-      z = data.position.z + data.moveSpeed.z
-    }, 19)
-    local business_cur = get_nearest_business(businesses, {x = data.position.x, y = data.position.y, z = data.position.z}, 19)
-    local business_prev = get_nearest_business(businesses, {
-      x = data.position.x - data.moveSpeed.x,
-      y = data.position.y - data.moveSpeed.y,
-      z = data.position.z - data.moveSpeed.z
-    }, 19)
-    if business_next ~= nil
-      and business_next == business_cur
-      and business_cur == business_prev
-      and recent_businesses[business_next] == nil
-      and business_next.good_type ~= GOOD_TYPE.NONE then
-      for i, route in ipairs(routes) do
-        if not overlay.sell_only_routes[0] or route.business == business_next then
-          local good_type = business_next.good_type
-          local quantity = vehicle_trunk[good_type]
-          if quantity > 0 then
-            alert('Selling '..quantity..' '..good_type.name)
-            recent_businesses[business_next] = os.time() + 5 * 60
-            sampSendChat('/sellprods')
-            return
-          end
-        end
-      end
+  local cur_car = getCarCharIsUsing(PLAYER_PED)
+  if cur_car <= 0 then return end
+  local cur_model = getCarModel(cur_car)
+
+  if not overlay.auto_sell[0] or not VEHICLE_MODEL[cur_model] then
+    current_business = nil
+    current_business_sync_count = 0
+    return
+  end
+  local nearest_business = get_nearest_business(businesses, {x = data.position.x, y = data.position.y, z = data.position.z}, 19)
+  if nearest_business ~= current_business then
+    current_business = nearest_business
+    current_business_sync_count = 0
+    return
+  end
+
+  current_business_sync_count = current_business_sync_count + 1
+  if current_business_sync_count <= 5
+  or not current_business
+  or current_business.good_type == GOOD_TYPE.NONE
+  or recent_businesses[current_business] then return end
+
+  if not overlay.sell_only_routes[0] then
+    sell_prods(current_business)
+    return
+  end
+
+  for _, route in ipairs(routes) do
+    if current_business == route.business then
+      sell_prods(current_business)
+      return
     end
   end
 end
